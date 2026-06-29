@@ -1,13 +1,14 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-const char* ssid = "Sohail";
-const char* password = "123456789";
+const char* ssid = "SCONET";
+const char* password = "111122ff";
 
 const int output16 = 16;
 const int output17 = 17;
 String output16State = "off";
 String output17State = "off";
+String outputtogglestate = "off";
 
 WebServer server(80);
 
@@ -35,6 +36,28 @@ void handleGPIO17Off() {
   handleRoot();
 }
 
+void patternhandler() 
+{
+    outputtogglestate = "on";
+    digitalWrite(output17, LOW);
+    digitalWrite(output16, LOW);
+    delay(2000);
+    digitalWrite(output16, HIGH);
+    delay(2000);
+    digitalWrite(output17, HIGH);
+    delay(2000);
+    digitalWrite(output16, LOW);
+    digitalWrite(output17, LOW);
+    handleRoot();
+
+}
+
+void patternkill()
+{
+  outputtogglestate = "off";
+  handleRoot();
+}
+
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
   html += "<link rel=\"icon\" href=\"data:,\">";
@@ -55,6 +78,13 @@ void handleRoot() {
     html += "<p><a href=\"/17/on\"><button class=\"button\">OFF</button></a></p>";
   } else {
     html += "<p><a href=\"/17/off\"><button class=\"button button2\">ON</button></a></p>";
+  }
+
+  html += "<p>TOGGLE PATTERN - State " + outputtogglestate + "</p>";
+  if (outputtogglestate == "off") {
+    html += "<p><a href=\"/toggle/on\"><button class=\"button\">START</button></a></p>";
+  } else {
+    html += "<p><a href = \"/toggle/off\"><button class=\"button button2\">STOPPED</button></a></p>";
   }
 
   html += "</body></html>";
@@ -86,6 +116,8 @@ void setup() {
   server.on("/16/off", handleGPIO16Off);
   server.on("/17/on", handleGPIO17On);
   server.on("/17/off", handleGPIO17Off);
+  server.on("/toggle/on", patternhandler);
+  server.on("/toggle/off", patternkill);
 
   server.begin();
   Serial.println("HTTP server started");
