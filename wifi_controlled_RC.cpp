@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
+#include <TinyGPS++.h>
 
 
 const char* ssid = "RCCCCCC";
@@ -46,9 +47,7 @@ bool motorInvertRight = false;
 // int hazardPatternStep = 0;      
 // const unsigned long HAZARD_INTERVAL_DEFAULT = 350; 
 
-// ==========================================
-// HTML / CSS / JS (Frontend)
-// ==========================================
+
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -190,6 +189,27 @@ const char index_html[] PROGMEM = R"rawliteral(
   .log-content { flex: 1; padding: 12px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 11px; }
   .log-tx { color: var(--accent); } .log-err { color: #ef4444; } .log-suc { color: #22c55e; }
 
+  /* GPS Panel */
+  #gps-box {
+    width: 190px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden;
+  }
+  .gps-header {
+    height: 36px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    font-size: 11px; font-weight: bold; background: rgba(159, 239, 0, 0.04);
+    color: var(--text-light); letter-spacing: 0.5px;
+  }
+  .gps-fix-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #ef4444; margin-left: auto;
+    transition: 0.3s;
+  }
+  .gps-fix-dot.locked { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+  .gps-readout { padding: 10px 12px; font-family: 'Consolas', monospace; font-size: 11px; }
+  .gps-row { display: flex; justify-content: space-between; padding: 3px 0; color: var(--text); }
+  .gps-row span:last-child { color: var(--text-light); font-weight: bold; }
+
   /* Overlays */
   .resize-handle { width: 24px; height: 24px; background: var(--accent); border: 2px solid var(--bg); border-radius: 50%; position: absolute; bottom: -8px; right: -8px; display: none; z-index: 100; }
   .edit-overlay { position: absolute; inset: 0; border: 2px dashed var(--accent); background: var(--accent-dim); border-radius: 40px; pointer-events: none; display: none; z-index: 90; }
@@ -215,6 +235,10 @@ const char index_html[] PROGMEM = R"rawliteral(
     #log-box { width: 200px; height: 130px; }
     .log-header { height: 30px; font-size: 10px; }
     .log-content { padding: 8px; font-size: 10px; }
+
+    #gps-box { width: 160px; }
+    .gps-header { height: 30px; font-size: 10px; }
+    .gps-readout { padding: 8px 10px; font-size: 10px; }
   }
 
   @media (max-width: 380px) {
@@ -264,6 +288,22 @@ const char index_html[] PROGMEM = R"rawliteral(
 </header>
 
 <div id="game-area">
+  <div id="grp-gps" class="group draggable" style="top: 80px; left: 20px;">
+    <div id="gps-box">
+      <div class="gps-header">
+        <span style="color:var(--accent)">◎</span> GPS
+        <div id="gps-fix-dot" class="gps-fix-dot"></div>
+      </div>
+      <div class="gps-readout">
+        <div class="gps-row"><span>LAT</span><span id="gps-lat">--</span></div>
+        <div class="gps-row"><span>LNG</span><span id="gps-lng">--</span></div>
+        <div class="gps-row"><span>SPEED</span><span id="gps-speed">--</span></div>
+        <div class="gps-row"><span>SATS</span><span id="gps-sats">0</span></div>
+      </div>
+    </div>
+    <div class="edit-overlay" style="border-radius:16px"></div>
+  </div>
+
   <div id="grp-log" class="group draggable" style="top: 50%; left: 50%; transform: translate(-50%, -50%);">
     <div id="log-box">
       <div class="log-header"><span style="color:var(--accent)">>_</span> SYSTEM LOG</div>
@@ -329,6 +369,28 @@ const char index_html[] PROGMEM = R"rawliteral(
       websocket.onopen = () => { isConnected = true; updateUIState(true); addLog(`Connected to ${ip}`, 'success'); };
       websocket.onclose = () => onDisconnect();
       websocket.onerror = () => addLog('Connection Error', 'error');
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'gps') updateGPSUI(data);
+        } catch(e) { /* ignore non-JSON messages */ }
+      };
+    }
+  }
+
+  function updateGPSUI(data) {
+    const dot = document.getElementById('gps-fix-dot');
+    document.getElementById('gps-sats').innerText = data.sats ?? 0;
+    if (data.fix) {
+      dot.classList.add('locked');
+      document.getElementById('gps-lat').innerText = data.lat.toFixed(6);
+      document.getElementById('gps-lng').innerText = data.lng.toFixed(6);
+      document.getElementById('gps-speed').innerText = (data.speed ?? 0).toFixed(1) + ' m/s';
+    } else {
+      dot.classList.remove('locked');
+      document.getElementById('gps-lat').innerText = '--';
+      document.getElementById('gps-lng').innerText = '--';
+      document.getElementById('gps-speed').innerText = '--';
     }
   }
 
@@ -467,6 +529,37 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+
+TinyGPSPlus gps;
+HardwareSerial GPSSerial(2); 
+
+unsigned long lastGpsBroadcast = 0;
+const unsigned long GPS_BROADCAST_INTERVAL = 1000; // ms between dashboard updates
+
+void initGPS() {
+  GPSSerial.begin(9600, SERIAL_8N1, 16, 17); // RX=16, TX=17 -- change to match your wiring
+}
+
+
+void updateGPS() {
+  while (GPSSerial.available()) {
+    gps.encode(GPSSerial.read());
+  }
+
+  if (millis() - lastGpsBroadcast < GPS_BROADCAST_INTERVAL) return;
+  lastGpsBroadcast = millis();
+
+  String json;
+  if (gps.location.isValid()) {
+    json = "{\"type\":\"gps\",\"fix\":true,\"lat\":" + String(gps.location.lat(), 6) +
+           ",\"lng\":" + String(gps.location.lng(), 6) +
+           ",\"speed\":" + String(gps.speed.mps(), 1) +
+           ",\"sats\":" + String(gps.satellites.value()) + "}";
+  } else {
+    json = "{\"type\":\"gps\",\"fix\":false,\"sats\":" + String(gps.satellites.value()) + "}";
+  }
+  ws.textAll(json);
+}
 // --- WEBSOCKET EVENT HANDLING ---
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
               AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -554,12 +647,14 @@ void setup() {
   ws.onEvent(onEvent);
   server.addHandler(&ws);
   server.begin();
+  initGPS();
 }
 
 void loop() {
   ws.cleanupClients();
   dnsServer.processNextRequest();
   setMotorSpeed(targetSpeedLeft, targetSpeedRight);
+  updateGPS();
 
   // unsigned long now = millis();
   // if (hazardActive && strobeActive) {
