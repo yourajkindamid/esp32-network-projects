@@ -35,6 +35,15 @@ int targetSpeedRight = 0;
 bool motorInvertLeft  = false; 
 bool motorInvertRight = false; 
 
+// Function Prototypes
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len);
+void setMotorSpeed(int speedL, int speedR);
+float getDistanceCM();
+void updateSonar();
+void Right();
+void Left();
+void Forward();
+void Reverse();
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -509,8 +518,25 @@ function toggleTheme() {
 </html>
 )rawliteral";
 
+void Right(bool on){
+  if (on) { targetSpeedLeft = MAX_SPEED; targetSpeedRight = -MAX_SPEED;}
+  else {  targetSpeedLeft = 0; targetSpeedRight = 0; }
+}
 
+void Left(bool on){
+  if (on) { targetSpeedLeft = -MAX_SPEED; targetSpeedRight = MAX_SPEED;}
+  else {  targetSpeedLeft = 0; targetSpeedRight = 0; }
+}
 
+void Forward(bool on){
+  if (on) { targetSpeedLeft = -MAX_SPEED; targetSpeedRight = -MAX_SPEED;}
+  else {  targetSpeedLeft = 0; targetSpeedRight = 0; }
+}
+
+void Backward(bool on){
+  if (on) { targetSpeedLeft = MAX_SPEED; targetSpeedRight = MAX_SPEED;}
+  else {  targetSpeedLeft = 0; targetSpeedRight = 0; }
+}
 
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
               AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -534,20 +560,16 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
       val = msg.substring(valStart, valEnd).toInt();
 
       if (cmd == "RIGHT") {
-        if (val) { targetSpeedLeft = MAX_SPEED; targetSpeedRight = -MAX_SPEED; }
-        else { targetSpeedLeft = 0; targetSpeedRight = 0; }
+        Right(val);
       }
       else if (cmd == "LEFT") {
-        if (val) { targetSpeedLeft = -MAX_SPEED; targetSpeedRight = MAX_SPEED; }
-        else { targetSpeedLeft = 0; targetSpeedRight = 0; }
+        Left(val);
       }
       else if (cmd == "FORWARD") {
-        if (val) { targetSpeedLeft = -MAX_SPEED; targetSpeedRight = -MAX_SPEED; }
-        else { targetSpeedLeft = 0; targetSpeedRight = 0; }
+        Forward(val);
       }
       else if (cmd == "BACKWARD") {
-        if (val) { targetSpeedLeft = MAX_SPEED; targetSpeedRight = MAX_SPEED; }
-        else { targetSpeedLeft = 0; targetSpeedRight = 0; }
+        Backward(val);
       }
     }
   }
@@ -563,8 +585,7 @@ void setMotorSpeed(int speedL, int speedR) {
   else { ledcWrite(IN3, 0); ledcWrite(IN4, 0); }
 }
 
-float getDistanceCM()
-{
+float getDistanceCM(){
     digitalWrite(TRIG_PIN, LOW);
     delayMicroseconds(2);
 
@@ -607,6 +628,7 @@ void setup() {
   server.addHandler(&ws);
   server.begin();
 }
+
 void updateSonar() {
   if (millis() - lastSonarRead < SONAR_READ_INTERVAL) return;
   lastSonarRead = millis();
