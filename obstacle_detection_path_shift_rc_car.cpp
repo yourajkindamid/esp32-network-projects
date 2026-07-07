@@ -35,6 +35,7 @@ int targetSpeedRight = 0;
 bool motorInvertLeft  = false; 
 bool motorInvertRight = false; 
 
+// WebServer Code -------------------------------------------------------------------------------------------
 
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -251,6 +252,11 @@ const char index_html[] PROGMEM = R"rawliteral(
   </div>
   
   <div class="header-right">
+    <button id="btn-scan" class="btn-tool btn-edit-text" onclick="sendCmd('SCAN',1)" title="Start 360 degree sweep scan">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+      <span>Scan</span>
+    </button>
+
     <button id="btn-theme" class="btn-tool" onclick="toggleTheme()" title="Toggle Theme">
       <svg id="theme-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="5"></circle>
@@ -358,6 +364,12 @@ function toggleTheme() {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'sonar') updateSonarUI(data);
+          else if (data.type === 'scan_start') addLog('Scan started', 'success');
+          else if (data.type === 'scan_point') {
+            if (data.ok) addLog(`Scan ${data.angle}&deg; -&gt; ${data.distance} cm`);
+            else addLog(`Scan ${data.angle}&deg; -&gt; no echo`, 'error');
+          }
+          else if (data.type === 'scan_complete') addLog('Scan complete', 'success');
         } catch(e) { /* ignore non-JSON messages */ }
       };
     }
@@ -383,13 +395,11 @@ function toggleTheme() {
       btn.innerText = 'Disconnect'; 
       btn.classList.add('disconnect'); 
       icon.classList.add('connected');
-      // Update SVG to Connected state (Remove cross)
       icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>';
     } else {
       btn.innerText = 'Connect'; 
       btn.classList.remove('disconnect'); 
       icon.classList.remove('connected');
-      // Update SVG to Disconnected state (Add cross)
       icon.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1l22 22"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55"/><path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39"/><path d="M10.71 5.05A16 16 0 0 1 22.58 9"/><path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>';
     }
   }
@@ -509,18 +519,46 @@ function toggleTheme() {
 </html>
 )rawliteral";
 
+// End of Webserver code------------------------------------------------------------------
+
 const float OBSTACLE_THRESHOLD_CM = 25.0;
 const unsigned long AVOID_TURN_DURATION = 250; 
 
 bool avoiding = false;
 unsigned long avoidStartTime = 0;
-bool connectedforturn = false;
+bool connected = false;
+
+// ================= SWEEP SCAN (rotate-in-place mapping) =================
+// The whole chassis rotates in fixed steps; at each stop we ping the sonar
+// and stream (angle, distance) back over the websocket. No encoders, so the
+// turn angle is timed -- TURN_MS_PER_DEG MUST be calibrated for your robot.
+
+#define SCAN_STEP_DEG       15.0   // degrees rotated per step
+#define SCAN_TOTAL_DEG      360.0  // total sweep (360 = full circle)
+#define TURN_MS_PER_DEG     8.0    // CALIBRATE: ms of full-speed turn per degree (see notes below)
+#define SCAN_SETTLE_MS      150    // pause after stopping, before first ping (let chassis stop rocking)
+#define SCAN_SAMPLES        3      // sonar pings averaged per angle
+#define SCAN_SAMPLE_GAP_MS  60     // gap between repeated pings at the same angle
+
+enum ScanState { SCAN_IDLE, SCAN_TURN, SCAN_SETTLE, SCAN_MEASURE };
+ScanState scanState = SCAN_IDLE;
+
+float scanHeading = 0;             // relative heading since scan start, degrees
+int   scanSamplesTaken = 0;
+int   scanSampleFails = 0;
+float scanSampleSum = 0;
+unsigned long scanStepStartTime = 0;
+
+void startScan();
+void updateScan();
+float getDistanceCM();
+void setMotorSpeed(int speedL, int speedR);
 
 void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
               AwsEventType type, void *arg, uint8_t *data, size_t len) {
   if (type == WS_EVT_CONNECT) {
     Serial.println("Client Connected");
-    connectedforturn = true;
+    connected = true;
   }
 
   else if (type == WS_EVT_DATA) {
@@ -555,12 +593,19 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         if (val) { targetSpeedLeft = MAX_SPEED; targetSpeedRight = MAX_SPEED; }
         else { targetSpeedLeft = 0; targetSpeedRight = 0; }
       }
+      else if (cmd == "SCAN") {
+        if (val && scanState == SCAN_IDLE) {
+          targetSpeedLeft = 0;
+          targetSpeedRight = 0;
+          startScan();
+        }
+      }      
     }
   }
 
   else if (type != WS_EVT_CONNECT) {
     Serial.println("Client disconnected");
-    connectedforturn = false;
+    connected = false;
   }
 }
 
@@ -587,8 +632,6 @@ float getDistanceCM()
 }
 
 
-
-
 void setMotorSpeed(int speedL, int speedR) {
   if (speedL > 0) { ledcWrite(IN1, speedL); ledcWrite(IN2, 0); } 
   else if (speedL < 0) { ledcWrite(IN1, 0); ledcWrite(IN2, -speedL); } 
@@ -599,6 +642,85 @@ void setMotorSpeed(int speedL, int speedR) {
   else { ledcWrite(IN3, 0); ledcWrite(IN4, 0); }
 }
 
+// --- Scan state machine -------------------------------------------------
+// Starts by measuring at heading 0 (no turn needed), then repeatedly:
+// turn SCAN_STEP_DEG -> settle -> average a few sonar pings -> stream point.
+
+void startScan() {
+  scanHeading = 0;
+  scanSamplesTaken = 0;
+  scanSampleFails = 0;
+  scanSampleSum = 0;
+  scanState = SCAN_SETTLE;      // settle briefly, then take the heading-0 reading
+  scanStepStartTime = millis();
+  ws.textAll("{\"type\":\"scan_start\"}");
+}
+
+void updateScan() {
+  switch (scanState) {
+
+    case SCAN_IDLE:
+      return;
+
+    case SCAN_TURN: {
+      setMotorSpeed(MAX_SPEED, -MAX_SPEED);   // spin in place (same polarity as RIGHT)
+      unsigned long turnDuration = (unsigned long)(SCAN_STEP_DEG * TURN_MS_PER_DEG);
+      if (millis() - scanStepStartTime >= turnDuration) {
+        setMotorSpeed(0, 0);
+        scanHeading += SCAN_STEP_DEG;
+        scanState = SCAN_SETTLE;
+        scanStepStartTime = millis();
+      }
+      break;
+    }
+
+    case SCAN_SETTLE: {
+      setMotorSpeed(0, 0);
+      if (millis() - scanStepStartTime >= SCAN_SETTLE_MS) {
+        scanSamplesTaken = 0;
+        scanSampleFails = 0;
+        scanSampleSum = 0;
+        scanState = SCAN_MEASURE;
+        scanStepStartTime = millis();
+      }
+      break;
+    }
+
+    case SCAN_MEASURE: {
+      setMotorSpeed(0, 0);
+      if (millis() - scanStepStartTime >= SCAN_SAMPLE_GAP_MS) {
+        float d = getDistanceCM();
+        if (d > 0) scanSampleSum += d;
+        else scanSampleFails++;
+        scanSamplesTaken++;
+        scanStepStartTime = millis();
+
+        if (scanSamplesTaken >= SCAN_SAMPLES) {
+          int validSamples = SCAN_SAMPLES - scanSampleFails;
+          String json;
+          if (validSamples > 0) {
+            float avgDist = scanSampleSum / validSamples;
+            json = "{\"type\":\"scan_point\",\"angle\":" + String(scanHeading, 1) +
+                   ",\"distance\":" + String(avgDist, 1) + ",\"ok\":true}";
+          } else {
+            json = "{\"type\":\"scan_point\",\"angle\":" + String(scanHeading, 1) +
+                   ",\"ok\":false}";
+          }
+          ws.textAll(json);
+
+          if (scanHeading + 0.01 >= SCAN_TOTAL_DEG) {
+            scanState = SCAN_IDLE;
+            ws.textAll("{\"type\":\"scan_complete\"}");
+          } else {
+            scanState = SCAN_TURN;
+            scanStepStartTime = millis();
+          }
+        }
+      }
+      break;
+    }
+  }
+}
 
 
 void setup() {
@@ -646,7 +768,6 @@ void updateSonar() {
 }
 
 
-
 void handleObstacleAvoidance() {
   if (!avoiding && lastDistance > 0 && lastDistance <= OBSTACLE_THRESHOLD_CM) {     //getting lastDistance from getDistanceCM and comparing it to the set threshold for turning
     avoiding = true;
@@ -668,9 +789,13 @@ void handleObstacleAvoidance() {
 void loop() {
   ws.cleanupClients();
   dnsServer.processNextRequest();
-  // setMotorSpeed(targetSpeedLeft, targetSpeedRight);
   updateSonar();
-  if (connectedforturn == true)
+
+  if (scanState != SCAN_IDLE) {
+    updateScan();
+  } else {
+    updateSonar();
+  if (connected == true)
     handleObstacleAvoidance();
     
 }
